@@ -11,14 +11,19 @@ This repository contains reusable PowerShell modules and scripts designed to enh
 ## Getting Started
 
 1. **Install/Update Modules**
+
    - Use the provided installer script:
+
      ```powershell
      .\Install-UtilitiesModules.ps1
      ```
+
    - This will copy the latest modules to your PowerShell user module path and import them.
 
 2. **Import the Utilities Module**
+
    - In your scripts or session:
+
      ```powershell
      Import-Module Utilities
      ```
@@ -29,15 +34,18 @@ This repository contains reusable PowerShell modules and scripts designed to enh
 ## Available Utilities
 
 ### Invoke-SyncFolders
+
 Synchronizes files between two folders, with preview, interactive approval, and efficient hash checking. Also supports reverse orphan sync.
 
 **Parameters:**
+
 - `-SourceFolder <string>`: The source folder to sync from. (Required)
 - `-DestinationFolder <string>`: The destination folder to sync to. (Required)
 - `-NoCheckHash`: If specified, disables SHA256 file hash comparison (uses only size/timestamp).
 - `-HashThreshold <string>`: Maximum file size to check hash (e.g. '2GB', '500MB'). Larger files only use size/timestamp. Default: '2GB'.
 
 **Examples:**
+
 ```powershell
 Invoke-SyncFolders -SourceFolder C:\Data -DestinationFolder D:\Backup
 Invoke-SyncFolders -SourceFolder .\A -DestinationFolder .\B -HashThreshold 500MB
@@ -48,6 +56,7 @@ Invoke-SyncFolders -SourceFolder .\A -DestinationFolder .\B -HashThreshold 500MB
 ## Contributing
 
 Contributions are welcome! To add a new utility:
+
 - Add your function to `modules/Utilities.psm1`.
 - Export it in `modules/Utilities.psd1`.
 - Document it in this README under **Available Utilities**.

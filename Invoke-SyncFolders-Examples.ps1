@@ -15,8 +15,10 @@ try {
 #######################
 
 # Set the source and destination folders (edit as needed)
-$source = "D:\source\test"
-$destination = "E:\destination\test"
+
+
+$source = "E:\Pictures\2017"
+$destination = "D:\Pictures\2017"
 
 # Validate folders exist
 if (-not (Test-Path $source -PathType Container)) {
@@ -28,7 +30,7 @@ if (-not (Test-Path $destination -PathType Container)) {
 }
 
 # Default: compares file hashes (Don't use this for large files or directories, as it can be slow)
-Invoke-SyncFolders -SourceFolder $source -DestinationFolder $destination
+Invoke-SyncFolders -SourceFolder $source -DestinationFolder $destination -NoCheckHash
 
 # Example: compare file hashes for a different pair
 Invoke-SyncFolders -SourceFolder "D:\source\tests" -DestinationFolder "E:\destination\test"

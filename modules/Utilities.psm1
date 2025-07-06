@@ -6,28 +6,12 @@
 #>
 
 function Invoke-SyncFolders {
-    <#
-    .SYNOPSIS
-        Synchronizes files between folders, with delta preview, interactive approval, and efficient hash checking.
-    .PARAMETER SourceFolder
-        The source folder to sync from.
-    .PARAMETER DestinationFolder
-        The destination folder to sync to.
-    .PARAMETER NoCheckHash
-        If specified, disables SHA256 file hash comparison (uses only size/timestamp).
-    .PARAMETER HashThreshold
-        Maximum file size to check hash (supports '2GB', '500MB', '1000000000'). Larger files only use size/timestamp.
-    .EXAMPLE
-        Invoke-SyncFolders -SourceFolder C:\Data -DestinationFolder D:\Backup
-    .EXAMPLE
-        Invoke-SyncFolders -SourceFolder .\A -DestinationFolder .\B -HashThreshold 500MB
-    #>
     [CmdletBinding()]
     param (
-        [Parameter(Mandatory=$true)]
+        [Parameter(Mandatory = $true)]
         [string]$SourceFolder,
 
-        [Parameter(Mandatory=$true)]
+        [Parameter(Mandatory = $true)]
         [string]$DestinationFolder,
 
         [switch]$NoCheckHash,
@@ -54,6 +38,14 @@ function Invoke-SyncFolders {
     $CheckHash = -not $NoCheckHash.IsPresent
     $HashThresholdBytes = Convert-SizeStringToBytes $HashThreshold
 
+    # --- Summary Counters ---
+    $Summary = @{
+        ForwardFolders = 0
+        ForwardFiles   = 0
+        ReverseFolders = 0
+        ReverseFiles   = 0
+    }
+
     function Get-DeltaTable {
         param($fromRoot, $toRoot, $checkHash, $hashThresholdBytes)
         $fromFiles = Get-ChildItem -Path $fromRoot -Recurse -File
@@ -61,47 +53,128 @@ function Invoke-SyncFolders {
         foreach ($file in $fromFiles) {
             $relativePath = $file.FullName.Substring($fromRoot.Length).TrimStart('\','/')
             $toFile = Join-Path $toRoot $relativePath
-            $copy = $true
-            $reason = "File does not exist at destination"
-            $srcHash = $null
-            $dstHash = $null
+            $toExists = Test-Path $toFile
+            $toSize = $toExists ? (Get-Item $toFile).Length : ""
+            $toTime = $toExists ? (Get-Item $toFile).LastWriteTime : ""
+            $srcHash = ""
+            $dstHash = ""
             $largeFile = $file.Length -gt $hashThresholdBytes
+            $differs = $false
+            $reason = ""
 
-            if (Test-Path $toFile) {
-                $toInfo = Get-Item $toFile
-
-                if ($checkHash -and -not $largeFile -and $toInfo.Length -le $hashThresholdBytes) {
+            if (-not $toExists) {
+                $reason = "File does not exist at destination"
+                if ($checkHash -and -not $largeFile) {
                     $srcHash = (Get-FileHash -Algorithm SHA256 -Path $file.FullName).Hash
-                    $dstHash = (Get-FileHash -Algorithm SHA256 -Path $toFile).Hash
-                    if ($srcHash -eq $dstHash) {
-                        $copy = $false
-                    } else {
-                        $reason = "File hashes differ"
-                    }
-                } else {
-                    # Large file: use size/timestamp only
-                    if ($toInfo.Length -eq $file.Length -and $toInfo.LastWriteTime -eq $file.LastWriteTime) {
-                        $copy = $false
-                    } else {
-                        $reason = "Destination differs (size/timestamp mismatch)"
-                    }
+                }
+                $deltaRows += [PSCustomObject]@{
+                    "Source File" = $file.FullName
+                    "Src Size"    = $file.Length
+                    "Src Time"    = $file.LastWriteTime
+                    "Src Hash"    = if ($checkHash -and $srcHash) { $srcHash.Substring($srcHash.Length - 5) } else { "" }
+                    "<-->"        = "-->"
+                    "Dest File"   = $toFile
+                    "Dst Size"    = ""
+                    "Dst Time"    = ""
+                    "Dst Hash"    = ""
+                    "Reason"      = $reason + ($(if ($checkHash -and $largeFile) { " (large file: hash skipped)" } else { "" }))
+                    "DupType"     = "copy"
                 }
             } else {
                 if ($checkHash -and -not $largeFile) {
                     $srcHash = (Get-FileHash -Algorithm SHA256 -Path $file.FullName).Hash
+                    $dstHash = (Get-FileHash -Algorithm SHA256 -Path $toFile).Hash
+                    $differs = $srcHash -ne $dstHash
+                    $reason = $differs ? "File hashes differ" : ""
+                } elseif ($checkHash -and $largeFile) {
+                    $differs = ($toSize -ne $file.Length) -or ($toTime -ne $file.LastWriteTime)
+                    $reason = $differs ? "Size/timestamp differ (large file: hash skipped)" : ""
+                } else {
+                    $differs = ($toSize -ne $file.Length) -or ($toTime -ne $file.LastWriteTime)
+                    $reason = $differs ? "Size/timestamp differ" : ""
+                }
+                if ($differs) {
+                    $deltaRows += [PSCustomObject]@{
+                        "Source File" = $file.FullName
+                        "Src Size"    = $file.Length
+                        "Src Time"    = $file.LastWriteTime
+                        "Src Hash"    = if ($checkHash -and $srcHash) { $srcHash.Substring($srcHash.Length - 5) } else { "" }
+                        "<-->"        = "-->"
+                        "Dest File"   = $toFile
+                        "Dst Size"    = $toSize
+                        "Dst Time"    = $toTime
+                        "Dst Hash"    = if ($checkHash -and $dstHash) { $dstHash.Substring($dstHash.Length - 5) } else { "" }
+                        "Reason"      = $reason
+                        "DupType"     = "conflict"
+                    }
                 }
             }
-            $deltaRows += [PSCustomObject]@{
-                "Source File" = $file.FullName
-                "Src Size"    = $file.Length
-                "Src Time"    = $file.LastWriteTime
-                "Src Hash"    = if ($srcHash) { $srcHash.Substring($srcHash.Length - 5) } else { "" }
-                "<-->"        = "-->"
-                "Dest File"   = $toFile
-                "Dst Size"    = if (Test-Path $toFile) { (Get-Item $toFile).Length } else { "" }
-                "Dst Time"    = if (Test-Path $toFile) { (Get-Item $toFile).LastWriteTime } else { "" }
-                "Dst Hash"    = if ($dstHash) { $dstHash.Substring($dstHash.Length - 5) } else { "" }
-                "Reason"      = $reason + ($(if ($largeFile) { " (large file: hash skipped)" } else { "" }))
+        }
+        return $deltaRows
+    }
+
+    function Get-ReverseDeltaTable {
+        param($fromRoot, $toRoot, $checkHash, $hashThresholdBytes)
+        $fromFiles = Get-ChildItem -Path $fromRoot -Recurse -File
+        $deltaRows = @()
+        foreach ($file in $fromFiles) {
+            $relativePath = $file.FullName.Substring($fromRoot.Length).TrimStart('\','/')
+            $toFile = Join-Path $toRoot $relativePath
+            $srcExists = Test-Path $toFile
+            $srcSize = $srcExists ? (Get-Item $toFile).Length : ""
+            $srcTime = $srcExists ? (Get-Item $toFile).LastWriteTime : ""
+            $srcHash = ""
+            $dstHash = ""
+            $largeFile = $file.Length -gt $hashThresholdBytes
+            $differs = $false
+            $reason = ""
+
+            if (-not $srcExists) {
+                $reason = "File does not exist at source"
+                if ($checkHash -and -not $largeFile) {
+                    $dstHash = (Get-FileHash -Algorithm SHA256 -Path $file.FullName).Hash
+                }
+                $deltaRows += [PSCustomObject]@{
+                    "Source File" = $toFile
+                    "Src Size"    = ""
+                    "Src Time"    = ""
+                    "Src Hash"    = ""
+                    "<-->"        = "<--"
+                    "Dest File"   = $file.FullName
+                    "Dst Size"    = $file.Length
+                    "Dst Time"    = $file.LastWriteTime
+                    "Dst Hash"    = if ($checkHash -and $dstHash) { $dstHash.Substring($dstHash.Length - 5) } else { "" }
+                    "Reason"      = $reason + ($(if ($checkHash -and $largeFile) { " (large file: hash skipped)" } else { "" }))
+                    "DupType"     = "copy"
+                }
+            } else {
+                if ($checkHash -and -not $largeFile) {
+                    $srcHash = (Get-FileHash -Algorithm SHA256 -Path $toFile).Hash
+                    $dstHash = (Get-FileHash -Algorithm SHA256 -Path $file.FullName).Hash
+                    $differs = $srcHash -ne $dstHash
+                    $reason = $differs ? "File hashes differ" : ""
+                } elseif ($checkHash -and $largeFile) {
+                    $differs = ($srcSize -ne $file.Length) -or ($srcTime -ne $file.LastWriteTime)
+                    $reason = $differs ? "Size/timestamp differ (large file: hash skipped)" : ""
+                } else {
+                    $differs = ($srcSize -ne $file.Length) -or ($srcTime -ne $file.LastWriteTime)
+                    $reason = $differs ? "Size/timestamp differ" : ""
+                }
+                if ($differs) {
+                    $deltaRows += [PSCustomObject]@{
+                        "Source File" = $toFile
+                        "Src Size"    = $srcSize
+                        "Src Time"    = $srcTime
+                        "Src Hash"    = if ($checkHash -and $srcHash) { $srcHash.Substring($srcHash.Length - 5) } else { "" }
+                        "<-->"        = "<--"
+                        "Dest File"   = $file.FullName
+                        "Dst Size"    = $file.Length
+                        "Dst Time"    = $file.LastWriteTime
+                        "Dst Hash"    = if ($checkHash -and $dstHash) { $dstHash.Substring($dstHash.Length - 5) } else { "" }
+                        "Reason"      = $reason
+                        "DupType"     = "conflict"
+                    }
+                }
             }
         }
         return $deltaRows
@@ -122,27 +195,79 @@ function Invoke-SyncFolders {
     }
 
     function Invoke-Sync {
-        param($deltaRows, $createdFolders, $fromRoot, $toRoot)
+        param(
+            $deltaRows, $createdFolders, $fromRoot, $toRoot, $mode = "forward", $action = "duplicate"
+        )
+        $foldersCreated = 0
+        $filesCopied = 0
         foreach ($folder in $createdFolders) {
             $toDir = Join-Path $toRoot $folder
             if (-not (Test-Path $toDir -PathType Container)) {
                 New-Item -ItemType Directory -Path $toDir -Force | Out-Null
                 Write-Host "Created folder: $folder" -ForegroundColor Green
+                $foldersCreated++
             }
         }
         foreach ($row in $deltaRows) {
-            $fromFile = $row."Source File"
-            $toFile = $row."Dest File"
+            $fromFile = $mode -eq "forward" ? $row."Source File" : $row."Dest File"
+            $toFile   = $mode -eq "forward" ? $row."Dest File"   : $row."Source File"
             $toDir = Split-Path $toFile -Parent
             if (-not (Test-Path $toDir)) {
                 New-Item -ItemType Directory -Path $toDir -Force | Out-Null
             }
-            Copy-Item -Path $fromFile -Destination $toFile -Force
-            Write-Host "Copied: $($fromFile.Substring($fromRoot.Length).TrimStart('\','/'))" -ForegroundColor Green
+            if ($row.DupType -eq "conflict") {
+                if ($action -eq "overwrite" -and $mode -eq "forward") {
+                    Copy-Item -Path $fromFile -Destination $toFile -Force
+                    Write-Host "Overwrote: $($toFile.Substring($toRoot.Length).TrimStart('\','/'))" -ForegroundColor Red
+                    $filesCopied++
+                } elseif ($action -eq "duplicate") {
+                    $base = [System.IO.Path]::GetFileNameWithoutExtension($toFile)
+                    $ext = [System.IO.Path]::GetExtension($toFile)
+                    $dupName = "$base-duplicate$ext"
+                    $dupPath = Join-Path -Path $toDir -ChildPath $dupName
+                    $suffix = 1
+                    while (Test-Path $dupPath) {
+                        $dupName = "$base-duplicate$suffix$ext"
+                        $dupPath = Join-Path -Path $toDir -ChildPath $dupName
+                        $suffix++
+                    }
+                    Copy-Item -Path $fromFile -Destination $dupPath -Force
+                    Write-Host "Duplicated as: $($dupPath.Substring($toRoot.Length).TrimStart('\','/'))" -ForegroundColor Yellow
+                    $filesCopied++
+                }
+                # else skip
+            } elseif ($row.DupType -eq "copy") {
+                if ($action -eq "copy") {
+                    if (-not (Test-Path $toFile)) {
+                        Copy-Item -Path $fromFile -Destination $toFile
+                        Write-Host "Copied (new): $($toFile.Substring($toRoot.Length).TrimStart('\','/'))" -ForegroundColor Green
+                        $filesCopied++
+                    }
+                } elseif ($action -eq "overwrite" -and $mode -eq "forward") {
+                    Copy-Item -Path $fromFile -Destination $toFile -Force
+                    Write-Host "Copied (overwritten): $($toFile.Substring($toRoot.Length).TrimStart('\','/'))" -ForegroundColor Red
+                    $filesCopied++
+                } elseif ($action -eq "duplicate") {
+                    $base = [System.IO.Path]::GetFileNameWithoutExtension($toFile)
+                    $ext = [System.IO.Path]::GetExtension($toFile)
+                    $dupName = "$base-duplicate$ext"
+                    $dupPath = Join-Path -Path $toDir -ChildPath $dupName
+                    $suffix = 1
+                    while (Test-Path $dupPath) {
+                        $dupName = "$base-duplicate$suffix$ext"
+                        $dupPath = Join-Path -Path $toDir -ChildPath $dupName
+                        $suffix++
+                    }
+                    Copy-Item -Path $fromFile -Destination $dupPath -Force
+                    Write-Host "Duplicated as: $($dupPath.Substring($toRoot.Length).TrimStart('\','/'))" -ForegroundColor Yellow
+                    $filesCopied++
+                }
+            }
         }
+        return @{Folders=$foldersCreated; Files=$filesCopied}
     }
 
-    # --- Phase 1: Preview and approve source -> destination ---
+    # --- Phase 1: Preview and approve source --> destination ---
     $createdFolders = Get-FolderDelta -fromRoot $SourceFolder -toRoot $DestinationFolder
     $deltaRows = Get-DeltaTable -fromRoot $SourceFolder -toRoot $DestinationFolder -checkHash:$CheckHash -hashThresholdBytes:$HashThresholdBytes
 
@@ -152,11 +277,22 @@ function Invoke-SyncFolders {
         $createdFolders | ForEach-Object { Write-Host "  $_" -ForegroundColor Cyan }
     }
     if ($deltaRows.Count -gt 0) {
-        Write-Host "`nFiles to be copied/overwritten:" -ForegroundColor Cyan
+        Write-Host "`nFiles to be copied/overwritten/duplicated:" -ForegroundColor Cyan
         $deltaRows | Format-Table -AutoSize
-        $doForward = Read-Host "`nWould you like to perform this sync from source to destination? [Y/N]"
-        if ($doForward -match '^[Yy]$') {
-            Invoke-Sync -deltaRows $deltaRows -createdFolders $createdFolders -fromRoot $SourceFolder -toRoot $DestinationFolder
+        $action = ""
+        while ($action -notmatch '^[CODScods]$') {
+            $action = Read-Host "`nChoose action: [C]opy all (only new), [O]verwrite all, [D]uplicate all, or [S]kip all"
+        }
+        switch ($action.ToUpper()) {
+            "C" { $selected = "copy" }
+            "O" { $selected = "overwrite" }
+            "D" { $selected = "duplicate" }
+            "S" { $selected = "skip" }
+        }
+        if ($selected -ne "skip") {
+            $result = Invoke-Sync -deltaRows $deltaRows -createdFolders $createdFolders -fromRoot $SourceFolder -toRoot $DestinationFolder -mode "forward" -action $selected
+            $Summary.ForwardFolders += $result.Folders
+            $Summary.ForwardFiles   += $result.Files
             Write-Host "Forward sync complete." -ForegroundColor Green
         } else {
             Write-Host "No files/folders were copied." -ForegroundColor Yellow
@@ -165,72 +301,32 @@ function Invoke-SyncFolders {
         Write-Host "No files to sync (delta table empty)." -ForegroundColor Green
     }
 
-    # --- Phase 2: Preview and approve destination -> source for orphans ---
-    function Get-OrphanDeltaTable {
-        param($fromRoot, $toRoot, $checkHash, $hashThresholdBytes)
-        $fromFiles = Get-ChildItem -Path $fromRoot -Recurse -File
-        $deltaRows = @()
-        foreach ($file in $fromFiles) {
-            $relativePath = $file.FullName.Substring($fromRoot.Length).TrimStart('\','/')
-            $toFile = Join-Path $toRoot $relativePath
-            if (-not (Test-Path $toFile)) {
-                $largeFile = $file.Length -gt $hashThresholdBytes
-                $dstHash = $null
-                if ($checkHash -and -not $largeFile) {
-                    $dstHash = (Get-FileHash -Algorithm SHA256 -Path $file.FullName).Hash
-                }
-                $deltaRows += [PSCustomObject]@{
-                    "Source File" = $toFile
-                    "Src Size"    = ""
-                    "Src Time"    = ""
-                    "Src Hash"    = ""
-                    "<-->"        = "<--"
-                    "Dest File"   = $file.FullName
-                    "Dst Size"    = $file.Length
-                    "Dst Time"    = $file.LastWriteTime
-                    "Dst Hash"    = if ($dstHash) { $dstHash.Substring($dstHash.Length - 5) } else { "" }
-                    "Reason"      = "File does not exist at source" + ($(if ($largeFile) { " (large file: hash skipped)" } else { "" }))
-                }
-            }
-        }
-        return $deltaRows
-    }
-    function Get-OrphanFolderDelta {
-        param($fromRoot, $toRoot)
-        $fromDirs = Get-ChildItem -Path $fromRoot -Recurse -Directory
-        $createdFolders = @()
-        foreach ($dir in $fromDirs) {
-            $relativePath = $dir.FullName.Substring($fromRoot.Length).TrimStart('\','/')
-            $toDir = Join-Path $toRoot $relativePath
-            if (-not (Test-Path $toDir -PathType Container)) {
-                $createdFolders += $relativePath
-            }
-        }
-        return $createdFolders
-    }
-
-    $orphanFolders = Get-OrphanFolderDelta -fromRoot $DestinationFolder -toRoot $SourceFolder
-    $orphanRows = Get-OrphanDeltaTable -fromRoot $DestinationFolder -toRoot $SourceFolder -checkHash:$CheckHash -hashThresholdBytes:$HashThresholdBytes
+    # --- Phase 2: Preview and approve destination --> source for orphans/diffs ---
+    $orphanFolders = Get-FolderDelta -fromRoot $DestinationFolder -toRoot $SourceFolder
+    $orphanRows = Get-ReverseDeltaTable -fromRoot $DestinationFolder -toRoot $SourceFolder -checkHash:$CheckHash -hashThresholdBytes:$HashThresholdBytes
 
     if ($orphanFolders.Count -gt 0 -or $orphanRows.Count -gt 0) {
-        Write-Host "`n========== REVERSE SYNC PREVIEW: Destination <-- Source (Orphans) ==========" -ForegroundColor Magenta
+        Write-Host "`n========== REVERSE SYNC PREVIEW: Destination <-- Source (Orphans and Diffs) ==========" -ForegroundColor Magenta
         if ($orphanFolders.Count -gt 0) {
             Write-Host "Folders to be created in source:"
             $orphanFolders | ForEach-Object { Write-Host "  $_" -ForegroundColor Magenta }
         }
         if ($orphanRows.Count -gt 0) {
-            Write-Host "`nFiles to be copied back to source:" -ForegroundColor Magenta
+            Write-Host "`nFiles to be copied/duplicated back to source:" -ForegroundColor Magenta
             $orphanRows | Format-Table -AutoSize
-            $doReverse = Read-Host "`nWould you like to sync these orphans back to the source? [Y/N]"
-            if ($doReverse -match '^[Yy]$') {
-                $orphanRowsForSync = @()
-                foreach ($row in $orphanRows) {
-                    $orphanRowsForSync += [PSCustomObject]@{
-                        "Source File" = $row."Dest File"
-                        "Dest File"   = $row."Source File"
-                    }
-                }
-                Invoke-Sync -deltaRows $orphanRowsForSync -createdFolders $orphanFolders -fromRoot $DestinationFolder -toRoot $SourceFolder
+            $action = ""
+            while ($action -notmatch '^[CDScds]$') {
+                $action = Read-Host "`nChoose action: [C]opy all (only new), [D]uplicate all, or [S]kip all (never overwrite source)"
+            }
+            switch ($action.ToUpper()) {
+                "C" { $selected = "copy" }
+                "D" { $selected = "duplicate" }
+                "S" { $selected = "skip" }
+            }
+            if ($selected -ne "skip") {
+                $result = Invoke-Sync -deltaRows $orphanRows -createdFolders $orphanFolders -fromRoot $DestinationFolder -toRoot $SourceFolder -mode "reverse" -action $selected
+                $Summary.ReverseFolders += $result.Folders
+                $Summary.ReverseFiles   += $result.Files
                 Write-Host "Reverse sync complete." -ForegroundColor Green
             } else {
                 Write-Host "No orphans were synced back." -ForegroundColor Yellow
@@ -241,6 +337,16 @@ function Invoke-SyncFolders {
     } else {
         Write-Host "`nNo orphans found in destination." -ForegroundColor Green
     }
+
+    # --- Final summary ---
+    Write-Host ""
+    Write-Host "==================== SYNC SUMMARY ====================" -ForegroundColor White
+    Write-Host "Source --> Destination:" -ForegroundColor Cyan
+    Write-Host ("  Folders created: {0,-6} Files copied/overwritten/duplicated: {1,-6}" -f $Summary.ForwardFolders, $Summary.ForwardFiles)
+    Write-Host "Destination --> Source:" -ForegroundColor Magenta
+    Write-Host ("  Folders created: {0,-6} Files copied/duplicated:           {1,-6}" -f $Summary.ReverseFolders, $Summary.ReverseFiles)
+    Write-Host "======================================================" -ForegroundColor White
 }
 
 Export-ModuleMember -Function Invoke-SyncFolders
+

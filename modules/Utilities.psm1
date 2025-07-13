@@ -16,9 +16,17 @@ function Invoke-SyncFolders {
 
         [switch]$NoCheckHash,
 
-        [string]$HashThreshold = "2GB"
+        [string]$HashThreshold = "2GB",
+
+        [string[]]$IncludeExtensions = @(),
+
+        [string[]]$ExcludeExtensions = @()
     )
 
+    <#
+    .SYNOPSIS
+        Converts a size string (e.g., 2GB, 500MB) to bytes.
+    #>
     function Convert-SizeStringToBytes {
         param([string]$sizeString)
         if ($sizeString -match '^\s*(\d+(?:\.\d+)?)\s*(B|KB|MB|GB|TB)?\s*$') {
@@ -35,6 +43,29 @@ function Invoke-SyncFolders {
         throw "Invalid size string: $sizeString (try e.g. '2GB', '512MB', '1000000')"
     }
 
+    <#
+    .SYNOPSIS
+        Filters a collection of files by include/exclude extension (case-insensitive).
+    #>
+    function Filter-FilesByExtension {
+        param(
+            [Parameter(Mandatory = $true)] $files,
+            [string[]]$include = @(),
+            [string[]]$exclude = @()
+        )
+        # Normalize extensions for case-insensitive match
+        $inc = $include | ForEach-Object { $_.ToLowerInvariant() }
+        $exc = $exclude | ForEach-Object { $_.ToLowerInvariant() }
+        $filtered = $files
+        if ($inc.Count -gt 0) {
+            $filtered = $filtered | Where-Object { $inc -contains $_.Extension.ToLowerInvariant() }
+        }
+        if ($exc.Count -gt 0) {
+            $filtered = $filtered | Where-Object { $exc -notcontains $_.Extension.ToLowerInvariant() }
+        }
+        return $filtered
+    }
+
     $CheckHash = -not $NoCheckHash.IsPresent
     $HashThresholdBytes = Convert-SizeStringToBytes $HashThreshold
 
@@ -47,8 +78,12 @@ function Invoke-SyncFolders {
     }
 
     function Get-DeltaTable {
-        param($fromRoot, $toRoot, $checkHash, $hashThresholdBytes)
+        param(
+            $fromRoot, $toRoot, $checkHash, $hashThresholdBytes,
+            [string[]]$IncludeExtensions = @(), [string[]]$ExcludeExtensions = @()
+        )
         $fromFiles = Get-ChildItem -Path $fromRoot -Recurse -File
+        $fromFiles = Filter-FilesByExtension $fromFiles $IncludeExtensions $ExcludeExtensions
         $deltaRows = @()
         foreach ($file in $fromFiles) {
             $relativePath = $file.FullName.Substring($fromRoot.Length).TrimStart('\','/')
@@ -114,8 +149,12 @@ function Invoke-SyncFolders {
     }
 
     function Get-ReverseDeltaTable {
-        param($fromRoot, $toRoot, $checkHash, $hashThresholdBytes)
+        param(
+            $fromRoot, $toRoot, $checkHash, $hashThresholdBytes,
+            [string[]]$IncludeExtensions = @(), [string[]]$ExcludeExtensions = @()
+        )
         $fromFiles = Get-ChildItem -Path $fromRoot -Recurse -File
+        $fromFiles = Filter-FilesByExtension $fromFiles $IncludeExtensions $ExcludeExtensions
         $deltaRows = @()
         foreach ($file in $fromFiles) {
             $relativePath = $file.FullName.Substring($fromRoot.Length).TrimStart('\','/')
@@ -235,7 +274,6 @@ function Invoke-SyncFolders {
                     Write-Host "Duplicated as: $($dupPath.Substring($toRoot.Length).TrimStart('\','/'))" -ForegroundColor Yellow
                     $filesCopied++
                 }
-                # else skip
             } elseif ($row.DupType -eq "copy") {
                 if ($action -eq "copy") {
                     if (-not (Test-Path $toFile)) {
@@ -269,7 +307,7 @@ function Invoke-SyncFolders {
 
     # --- Phase 1: Preview and approve source --> destination ---
     $createdFolders = Get-FolderDelta -fromRoot $SourceFolder -toRoot $DestinationFolder
-    $deltaRows = Get-DeltaTable -fromRoot $SourceFolder -toRoot $DestinationFolder -checkHash:$CheckHash -hashThresholdBytes:$HashThresholdBytes
+    $deltaRows = Get-DeltaTable -fromRoot $SourceFolder -toRoot $DestinationFolder -checkHash:$CheckHash -hashThresholdBytes:$HashThresholdBytes -IncludeExtensions $IncludeExtensions -ExcludeExtensions $ExcludeExtensions
 
     Write-Host "`n========== SYNC PREVIEW: Source --> Destination ==========" -ForegroundColor Cyan
     if ($createdFolders.Count -gt 0) {
@@ -303,7 +341,7 @@ function Invoke-SyncFolders {
 
     # --- Phase 2: Preview and approve destination --> source for orphans/diffs ---
     $orphanFolders = Get-FolderDelta -fromRoot $DestinationFolder -toRoot $SourceFolder
-    $orphanRows = Get-ReverseDeltaTable -fromRoot $DestinationFolder -toRoot $SourceFolder -checkHash:$CheckHash -hashThresholdBytes:$HashThresholdBytes
+    $orphanRows = Get-ReverseDeltaTable -fromRoot $DestinationFolder -toRoot $SourceFolder -checkHash:$CheckHash -hashThresholdBytes:$HashThresholdBytes -IncludeExtensions $IncludeExtensions -ExcludeExtensions $ExcludeExtensions
 
     if ($orphanFolders.Count -gt 0 -or $orphanRows.Count -gt 0) {
         Write-Host "`n========== REVERSE SYNC PREVIEW: Destination <-- Source (Orphans and Diffs) ==========" -ForegroundColor Magenta
@@ -349,4 +387,3 @@ function Invoke-SyncFolders {
 }
 
 Export-ModuleMember -Function Invoke-SyncFolders
-

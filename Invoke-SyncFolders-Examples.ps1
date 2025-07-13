@@ -17,8 +17,8 @@ try {
 # Set the source and destination folders (edit as needed)
 
 
-$source = "E:\_app_data_atos"
-$destination = "E:\_backup\_backup_work_laptop_16-04-2025\_app_data"
+$source = "E:\Pictures\2024\Vakantie Mexico 2024\Fotos"
+$destination = "E:\Pictures\2025\iPhone Robert 12-7-2025\2024\07 - July\Vakantie Mexico 2024"
 
 # Validate folders exist
 if (-not (Test-Path $source -PathType Container)) {
@@ -34,7 +34,7 @@ Invoke-SyncFolders -SourceFolder $source -DestinationFolder $destination -NoChec
 
 # Same as above, but exclude files with .AAE extension (common for image metadata files)
 # This is useful to avoid syncing metadata files that are not needed in the destination.
-Invoke-SyncFolders -SourceFolder $source -DestinationFolder $destination -NoCheckHash -ExcludeExtensions @('.AAE')
+Invoke-SyncFolders -SourceFolder $source -DestinationFolder $destination -NoCheckHash -IncludeExtensions @('.JPEG')
 
 # Example: compare file hashes for a different pair
 Invoke-SyncFolders -SourceFolder "D:\source\tests" -DestinationFolder "E:\destination\test"

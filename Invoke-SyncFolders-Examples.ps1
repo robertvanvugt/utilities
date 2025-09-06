@@ -16,9 +16,8 @@ try {
 
 # Set the source and destination folders (edit as needed)
 
-
-$source = "E:\Pictures\2024\Vakantie Mexico 2024\Fotos"
-$destination = "E:\Pictures\2025\iPhone Robert 12-7-2025\2024\07 - July\Vakantie Mexico 2024"
+$source = "E:\Pictures\2018"
+$destination = "D:\Pictures\2018"
 
 # Validate folders exist
 if (-not (Test-Path $source -PathType Container)) {

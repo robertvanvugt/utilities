@@ -386,4 +386,50 @@ function Invoke-SyncFolders {
     Write-Host "======================================================" -ForegroundColor White
 }
 
+function Set-LivePhotoTag {
+    <#
+    .SYNOPSIS
+        Identify and tag iPhone Live Photo .MOV files.
+
+    .DESCRIPTION
+        Detects Live Photos using Keys:LivePhotoAuto = 1.
+        If matched, adds XMP keywords (default: "LivePhoto").
+
+    .PARAMETER Path
+        Root folder to scan (default = .)
+
+    .PARAMETER Tag
+        Keyword to add (default = "LivePhoto")
+
+    .PARAMETER Recurse
+        Recurse subfolders (default = $true)
+
+    .EXAMPLE
+        Set-LivePhotoTag -Path "D:\iPhoneDump" -WhatIf
+    #>
+
+    [CmdletBinding(SupportsShouldProcess=$true)]
+    param(
+        [Parameter(Position=0)]
+        [string]$Path = ".",
+        [string]$Tag = "LivePhoto",
+        [switch]$Recurse = $true
+    )
+
+    $exif = "exiftool.exe"
+    $args = @("-ext","mov")
+    if ($Recurse) { $args = @("-r") + $args }
+
+    # Detection: LivePhotoAuto == 1
+    $detect = '($Keys:LivePhotoAuto eq 1)'
+
+    if ($PSCmdlet.ShouldProcess($Path, "Tagging Live Photos with '$Tag'")) {
+        & $exif @args -if $detect -overwrite_original `
+            ("-XMP:Subject+=$Tag") `
+            ("-XMP:HierarchicalSubject+=$Tag") `
+            $Path
+    }
+}
+
 Export-ModuleMember -Function Invoke-SyncFolders
+Export-ModuleMember -Function Set-LivePhotoTag

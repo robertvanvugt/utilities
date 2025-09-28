@@ -386,50 +386,158 @@ function Invoke-SyncFolders {
     Write-Host "======================================================" -ForegroundColor White
 }
 
-function Set-LivePhotoTag {
+function Group-iPhoneMedia {
     <#
     .SYNOPSIS
-        Identify and tag iPhone Live Photo .MOV files.
+        Sort iPhone media in a folder into subfolders: LivePhotos, Pictures, Videos (top-level only).
 
     .DESCRIPTION
-        Detects Live Photos using Keys:LivePhotoAuto = 1.
-        If matched, adds XMP keywords (default: "LivePhoto").
+        - Uses ExifTool to detect Live Photo MOVs (Keys:LivePhotoAuto == 1) and moves them to 'LivePhotos'.
+        - Moves all regular pictures to 'Pictures'.
+        - Moves regular videos to 'Videos', excluding Live Photo MOVs already moved.
+        - Non-recursive: only processes files directly under the specified Path.
+        - Supports -WhatIf and -Verbose. Avoids overwriting by auto-incrementing file names.
 
     .PARAMETER Path
-        Root folder to scan (default = .)
+        Folder containing your downloaded media (top-level only). Default: current directory.
 
-    .PARAMETER Tag
-        Keyword to add (default = "LivePhoto")
+    .PARAMETER ExifToolPath
+        Path or command name for exiftool. Default: 'exiftool.exe'.
 
-    .PARAMETER Recurse
-        Recurse subfolders (default = $true)
+    .PARAMETER PictureExtensions
+        Picture extensions (no dot). Default includes jpg,jpeg,heic,heif,png,tif,tiff,dng,bmp,gif.
 
-    .EXAMPLE
-        Set-LivePhotoTag -Path "D:\iPhoneDump" -WhatIf
+    .PARAMETER VideoExtensions
+        Video extensions (no dot). Default includes mov,mp4,m4v,avi,mts,m2ts.
+        (Live Photo MOVs are excluded from this set by detection.)
     #>
 
     [CmdletBinding(SupportsShouldProcess=$true)]
     param(
         [Parameter(Position=0)]
         [string]$Path = ".",
-        [string]$Tag = "LivePhoto",
-        [switch]$Recurse = $true
+        [string]$ExifToolPath = "exiftool.exe",
+        [string[]]$PictureExtensions = @('jpg','jpeg','heic','heif','png','tif','tiff','dng','bmp','gif'),
+        [string[]]$VideoExtensions   = @('mov','mp4','m4v','avi','mts','m2ts')
     )
 
-    $exif = "exiftool.exe"
-    $args = @("-ext","mov")
-    if ($Recurse) { $args = @("-r") + $args }
-
-    # Detection: LivePhotoAuto == 1
-    $detect = '($Keys:LivePhotoAuto eq 1)'
-
-    if ($PSCmdlet.ShouldProcess($Path, "Tagging Live Photos with '$Tag'")) {
-        & $exif @args -if $detect -overwrite_original `
-            ("-XMP:Subject+=$Tag") `
-            ("-XMP:HierarchicalSubject+=$Tag") `
-            $Path
+    # Resolve and validate
+    $Path = (Resolve-Path -LiteralPath $Path).Path
+    if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
+        throw "Path not found or not a folder: $Path"
     }
+
+    # Ensure exiftool exists
+    try {
+        $null = Get-Command -Name $ExifToolPath -ErrorAction Stop
+    } catch {
+        throw "ExifTool not found: '$ExifToolPath'. Add it to PATH or pass -ExifToolPath."
+    }
+
+    # Get top-level files only
+    $allFiles = Get-ChildItem -LiteralPath $Path -File
+
+    if (-not $allFiles) {
+        Write-Host "No files found in: $Path"
+        return
+    }
+
+    # 1) Detect Live Photo MOVs (no recursion)
+    $exifArgs = @(
+        "-m",                        # ignore minor warnings
+        "-ext","mov",
+        "-if",'$Keys:LivePhotoAuto eq 1',
+        "-p",'$FilePath',
+        $Path
+    )
+    Write-Verbose "Running: $ExifToolPath $($exifArgs -join ' ')"
+    $livePhotoMovPaths = (& $ExifToolPath @exifArgs) | Where-Object {
+        $_ -and (Test-Path -LiteralPath $_ -PathType Leaf)
+    }
+
+    # Normalize to hashset (case-insensitive) for fast membership checks
+    $livePhotoSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($p in $livePhotoMovPaths) { $null = $livePhotoSet.Add((Resolve-Path -LiteralPath $p).Path) }
+
+    # Partition files by type
+    $pictures = @()
+    $videos   = @()
+    $liveMovs = @()
+
+    foreach ($f in $allFiles) {
+        $ext = $f.Extension.TrimStart('.').ToLowerInvariant()
+        $full = $f.FullName
+
+        if ($ext -in $PictureExtensions) {
+            $pictures += $f
+        }
+        elseif ($ext -in $VideoExtensions) {
+            # If it's a detected Live Photo MOV, classify as liveMovs; else as regular video
+            if ($ext -eq 'mov' -and $livePhotoSet.Contains($full)) {
+                $liveMovs += $f
+            } else {
+                $videos += $f
+            }
+        }
+        # else: ignore non-media files silently
+    }
+
+    # Prepare destination folders
+    $destLive     = Join-Path $Path 'LivePhotos'
+    $destPictures = Join-Path $Path 'Pictures'
+    $destVideos   = Join-Path $Path 'Videos'
+
+    foreach ($d in @($destLive,$destPictures,$destVideos)) {
+        if (-not (Test-Path -LiteralPath $d)) {
+            if ($PSCmdlet.ShouldProcess($d, "Create folder")) {
+                $null = New-Item -ItemType Directory -Path $d
+            }
+        }
+    }
+
+    # Unique-path helper to avoid overwriting
+    function Get-UniquePath([string]$TargetPath) {
+        if (-not (Test-Path -LiteralPath $TargetPath)) { return $TargetPath }
+        $dir  = Split-Path -Path $TargetPath -Parent
+        $name = [System.IO.Path]::GetFileNameWithoutExtension($TargetPath)
+        $ext  = [System.IO.Path]::GetExtension($TargetPath)
+        $i = 1
+        while ($true) {
+            $try = Join-Path $dir ("{0} ({1}){2}" -f $name,$i,$ext)
+            if (-not (Test-Path -LiteralPath $try)) { return $try }
+            $i++
+        }
+    }
+
+    # Move helper
+    function Move-Set([System.IO.FileInfo[]]$files, [string]$dest, [string]$label) {
+        $count = 0
+        foreach ($f in $files) {
+            $target = Get-UniquePath (Join-Path $dest $f.Name)
+            if ($PSCmdlet.ShouldProcess($f.FullName, "Move to '$target'")) {
+                Move-Item -LiteralPath $f.FullName -Destination $target
+                $count++
+            }
+        }
+        Write-Host ("Moved {0} {1}." -f $count, $label)
+    }
+
+    # Execute moves
+    Write-Host "Summary (top-level only):"
+    Write-Host ("  Live Photo MOVs : {0}" -f $($liveMovs.Count))
+    Write-Host ("  Pictures        : {0}" -f $($pictures.Count))
+    Write-Host ("  Videos          : {0}" -f $($videos.Count))
+
+    Move-Set -files $liveMovs  -dest $destLive     -label "Live Photo video(s)"
+    Move-Set -files $pictures  -dest $destPictures -label "picture(s)"
+    Move-Set -files $videos    -dest $destVideos   -label "video(s)"
+
+    Write-Host "Done."
+    Write-Host "Destinations:"
+    Write-Host "  $destLive"
+    Write-Host "  $destPictures"
+    Write-Host "  $destVideos"
 }
 
+Export-ModuleMember -Function Group-iPhoneMedia
 Export-ModuleMember -Function Invoke-SyncFolders
-Export-ModuleMember -Function Set-LivePhotoTag

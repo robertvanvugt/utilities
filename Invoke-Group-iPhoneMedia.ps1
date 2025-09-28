@@ -1,4 +1,4 @@
-# Example usages for Invoke-SyncFolders from the Utilities module
+# Example usages for Group-iPhoneMedia from the Utilities module
 # Best practices: robust import, error handling, parameterization, and clear output
 
 # Import the Utilities module (ensure it is installed in your user module path)
@@ -11,7 +11,7 @@ try {
 }
 
 #######################
-# Example usages
+# Example usages Group-iPhoneMedia
 #######################
 
 # Set the source and destination folders (edit as needed)
@@ -24,14 +24,9 @@ if (-not (Test-Path $source -PathType Container)) {
     return
 }
 
-# Preview only (no changes made)
-Set-LivePhotoTag -Path $source -WhatIf
+# Preview only (no changes)
+Group-iPhoneMedia -Path $source -WhatIf -Verbose
 
-# Actually tag the files
-Set-LivePhotoTag -Path $source
+# Actual move (no preview)
+Group-iPhoneMedia -Path $source -Verbose
 
-# No recursion
-Set-LivePhotoTag -Path $source -Recurse:$false
-
-# Use a custom keyword
-Set-LivePhotoTag -Path $source -Tag "AppleLivePhoto"

@@ -16,7 +16,7 @@ try {
 
 # Set the source and destination folders (edit as needed)
 
-$source = "C:\tmp\pics"
+$source = "E:\Pictures\2025\Vakantie USA 2025"
 
 # Validate folders exist
 if (-not (Test-Path $source -PathType Container)) {

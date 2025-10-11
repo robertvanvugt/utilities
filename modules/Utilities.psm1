@@ -539,5 +539,336 @@ function Group-iPhoneMedia {
     Write-Host "  $destVideos"
 }
 
+function Add-FileNamePrefix {
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$FolderPath,
+        [Parameter(Mandatory = $true)]
+        [string]$Prefix
+    )
+
+    if (-not (Test-Path -LiteralPath $FolderPath -PathType Container)) {
+        throw "Folder not found: $FolderPath"
+    }
+
+    $files = Get-ChildItem -LiteralPath $FolderPath -File
+    foreach ($file in $files) {
+        $newName = $Prefix + $file.Name
+        if ($PSCmdlet.ShouldProcess($file.FullName, "Rename to '$newName'")) {
+            Rename-Item -LiteralPath $file.FullName -NewName $newName
+            Write-Host ("Renamed: {0} -> {1}" -f $file.Name, $newName)
+        }
+    }
+}
+
+function Rename-PhotosByDateTaken {
+    <#
+    .SYNOPSIS
+        Renames image files (.jpg, .jpeg, .png) by their "Date taken" property (oldest → newest).
+
+    .DESCRIPTION
+        This cmdlet uses Windows Shell metadata to retrieve each photo's "Date taken" value,
+        sorts the photos chronologically, and prefixes each filename with a zero-padded
+        numeric counter (e.g., 001_IMG_1234.JPG).
+
+        - Locale-aware: works with “Date taken”, “Opnamedatum”, “Aufnahmedatum”, etc.
+        - Falls back to the file’s CreationTimeUtc if no DateTaken metadata is found.
+        - Operates only on the top-level of the specified folder.
+        - Supports a DryRun mode for safe preview before renaming.
+
+    .PARAMETER FolderPath
+        The folder containing the photos to rename. Defaults to the current directory.
+
+    .PARAMETER DryRun
+        If set to $true (default), shows what would happen without renaming.
+        Set to $false to actually perform the rename.
+
+    .EXAMPLE
+        Rename-PhotosByDateTaken -FolderPath "E:\Pictures\2025\USA"
+
+        Lists all photos in the folder sorted by their Date Taken, showing new names.
+
+    .EXAMPLE
+        Rename-PhotosByDateTaken -FolderPath "E:\Pictures\2025\USA" -DryRun:$false
+
+        Performs the actual renaming using the discovered Date Taken order.
+
+    .NOTES
+        Relies on the Windows Shell COM interface for metadata.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Position = 0)]
+        [string]$FolderPath = ".",
+        [bool]$DryRun = $true
+    )
+
+    $AllowedExtensions = @('.jpg','.jpeg','.png')
+    $TargetFolder = (Resolve-Path -LiteralPath $FolderPath).Path
+    $PhotoFiles = Get-ChildItem -LiteralPath $TargetFolder -File |
+        Where-Object { $AllowedExtensions -contains $_.Extension.ToLowerInvariant() }
+    if (-not $PhotoFiles) { Write-Host "No matching image files found in $TargetFolder"; return }
+
+    function Clean-TextValue([string]$InputText) {
+        if ([string]::IsNullOrWhiteSpace($InputText)) { return $null }
+        ($InputText -replace '(\p{Cf}|\u200E|\u200F|\u202A|\u202B|\u202C|\u202D|\u202E|\u00A0)', '' -replace '\s*-\s*','-' -replace '\s+',' ').Trim()
+    }
+
+    try { $ShellApplication = New-Object -ComObject Shell.Application } catch {
+        Write-Error "Shell COM unavailable."; return
+    }
+    $ShellNamespace = $ShellApplication.Namespace($TargetFolder)
+    if (-not $ShellNamespace) { Write-Error "Cannot access Shell namespace for $TargetFolder"; return }
+
+    $DateTakenIndex = $null
+    for ($i=0; $i -le 300; $i++) {
+        $HeaderName = Clean-TextValue ($ShellNamespace.GetDetailsOf($null,$i))
+        if ($HeaderName -and $HeaderName -match '^(?i)(date taken|opnamedatum|aufnahmedatum)$') {
+            $DateTakenIndex = $i; break
+        }
+    }
+
+    $Culture = [System.Globalization.CultureInfo]::CurrentCulture
+
+    $PhotoMetadata = foreach ($Photo in $PhotoFiles) {
+        $ShellItem = $ShellNamespace.ParseName($Photo.Name)
+        $RawDateTaken = if ($DateTakenIndex -ne $null -and $ShellItem) { $ShellNamespace.GetDetailsOf($ShellItem,$DateTakenIndex) } else { $null }
+        $CleanDateTaken = Clean-TextValue $RawDateTaken
+        $ParsedDateLocal = $null
+        if ($CleanDateTaken) {
+            try { $ParsedDateLocal = [datetime]::Parse($CleanDateTaken,$Culture,[System.Globalization.DateTimeStyles]::AssumeLocal) } catch {}
+        }
+        if ($ParsedDateLocal) {
+            $ParsedDateTakenUtc = [datetimeoffset]::new($ParsedDateLocal).ToUniversalTime()
+            [pscustomobject]@{ FileObject=$Photo; OriginalName=$Photo.Name; SortDateUtc=$ParsedDateTakenUtc; Source='DateTaken' }
+        } else {
+            $ParsedDateTakenUtc = [datetimeoffset]::new($Photo.CreationTimeUtc)
+            [pscustomobject]@{ FileObject=$Photo; OriginalName=$Photo.Name; SortDateUtc=$ParsedDateTakenUtc; Source='CreationTimeUtc' }
+        }
+    }
+
+    $SortedPhotos = $PhotoMetadata | Sort-Object SortDateUtc, @{e={$_.OriginalName}}
+    $StartNumber = 1
+
+    # FIX: Proper digit width calculation
+    $TotalCount = $SortedPhotos.Count + $StartNumber
+    $DigitWidth = [Math]::Max(2,[int][Math]::Ceiling([Math]::Log10([double]([Math]::Max(1,$TotalCount)))))
+
+    function Get-UniqueFileName($DirectoryPath,$ProposedName) {
+        $Candidate = Join-Path $DirectoryPath $ProposedName
+        if (-not (Test-Path -LiteralPath $Candidate)) { return $ProposedName }
+        $Base = [IO.Path]::GetFileNameWithoutExtension($ProposedName)
+        $Ext  = [IO.Path]::GetExtension($ProposedName)
+        $i=1
+        while ($true) {
+            $Alt = "{0} ({1}){2}" -f $Base,$i,$Ext
+            if (-not (Test-Path -LiteralPath (Join-Path $DirectoryPath $Alt))) { return $Alt }
+            $i++
+        }
+    }
+
+    "{0,-4} {1,-34} {2,-19} {3}" -f "No.","OldName","When(UTC)","NewName"
+    $Counter = $StartNumber
+    foreach ($Photo in $SortedPhotos) {
+        $Prefix = ('{0:D' + $DigitWidth + '}') -f $Counter
+        $ProposedName = "{0}_{1}" -f $Prefix,$Photo.OriginalName
+        $UniqueName = Get-UniqueFileName $Photo.FileObject.DirectoryName $ProposedName
+        "{0,-4} {1,-34} {2,-19} {3}" -f $Counter,$Photo.OriginalName,$Photo.SortDateUtc.ToString("yyyy-MM-dd HH:mm:ss"),$UniqueName
+        if (-not $DryRun) {
+            Rename-Item -LiteralPath $Photo.FileObject.FullName -NewName $UniqueName
+        }
+        $Counter++
+    }
+
+    if ($DryRun) {
+        Write-Host "`n(DRY RUN) No files were renamed. Use -DryRun:`$false to execute changes." -ForegroundColor Yellow
+    }
+}
+
+function Rename-VideosByCaptureDate {
+    <#
+    .SYNOPSIS
+        Renames .mov and .mp4 files by their capture/creation date using ExifTool (oldest → newest).
+
+    .DESCRIPTION
+        Reads reliable video timestamps via ExifTool JSON and sorts chronologically.
+        Priority (first hit wins):
+            MediaCreateDate → CreateDate → TrackCreateDate → Keys:CreationDate → FileModifyDate
+        Falls back to filesystem CreationTimeUtc if no metadata parses.
+        Top-level only (non-recursive). Prints a preview table; set -DryRun:$false to rename.
+
+    .PARAMETER FolderPath
+        Folder containing the video files. Default: current directory.
+
+    .PARAMETER ExifToolPath
+        Path or command name for ExifTool. Default: 'exiftool.exe'.
+
+    .PARAMETER DryRun
+        Preview only when $true (default). Set to $false to perform the rename.
+    #>
+
+    [CmdletBinding()]
+    param(
+        [Parameter(Position=0)]
+        [string]$FolderPath = ".",
+        [string]$ExifToolPath = "exiftool.exe",
+        [bool]$DryRun = $true
+    )
+
+    # 1) Resolve folder and pick video files (top-level only)
+    $AllowedExtensions = @('.mov', '.mp4')
+    $TargetFolder = (Resolve-Path -LiteralPath $FolderPath).Path
+
+    $VideoFiles = Get-ChildItem -LiteralPath $TargetFolder -File |
+        Where-Object { $AllowedExtensions -contains $_.Extension.ToLowerInvariant() }
+
+    if (-not $VideoFiles) {
+        Write-Host "No matching video files found in $TargetFolder"
+        return
+    }
+
+    # 2) Call ExifTool once for timestamps (JSON)
+    # Ask for multiple tags explicitly, and normalize QT times to UTC where possible.
+    $ExifArgs = @(
+        "-q","-q","-m","-json",
+        "-api","QuickTimeUTC=1",
+        "-d","%Y-%m-%dT%H:%M:%S%z",
+        "-MediaCreateDate",
+        "-CreateDate",
+        "-TrackCreateDate",
+        "-Keys:CreationDate",
+        "-FileModifyDate",
+        "-ext","mov","-ext","mp4",
+        $TargetFolder
+    )
+    $ExifJson = & $ExifToolPath @ExifArgs
+    $ExifItems = @()
+    if ($ExifJson) { $ExifItems = $ExifJson | ConvertFrom-Json }
+
+    # Map: normalized full path -> metadata object
+    function Normalize-FullPath([string]$p) {
+        if ([string]::IsNullOrWhiteSpace($p)) { return $null }
+        return ([System.IO.Path]::GetFullPath($p))
+    }
+    $MetadataByPath = @{}
+    foreach ($item in $ExifItems) {
+        $sf = Normalize-FullPath $item.SourceFile
+        if ($sf) { $MetadataByPath[$sf] = $item }
+    }
+
+    # 3) Robust datetime parser -> UTC
+    function Convert-ToUtcDto([string]$Text) {
+        if ([string]::IsNullOrWhiteSpace($Text)) { return $null }
+        $formats = @(
+            'yyyy-MM-ddTHH:mm:ss.fffzzz',
+            'yyyy-MM-ddTHH:mm:sszzz',
+            'yyyy-MM-dd HH:mm:sszzz',
+            'yyyy:MM:dd HH:mm:ss',
+            'yyyy-MM-dd HH:mm:ss'
+        )
+        foreach ($fmt in $formats) {
+            try {
+                $dt = [datetimeoffset]::ParseExact(
+                    $Text,
+                    $fmt,
+                    [Globalization.CultureInfo]::InvariantCulture,
+                    [Globalization.DateTimeStyles]::None
+                )
+                return $dt.ToUniversalTime()
+            } catch {}
+        }
+        try {
+            return ([datetimeoffset]::Parse($Text, [Globalization.CultureInfo]::InvariantCulture)).ToUniversalTime()
+        } catch {
+            return $null
+        }
+    }
+
+    # 4) Build records with chosen UTC date (and which tag was used)
+    $VideoRecords = foreach ($video in $VideoFiles) {
+        $meta = $MetadataByPath[(Normalize-FullPath $video.FullName)]
+
+        # Ordered tag candidates (label -> value)
+        $candidates = [ordered]@{}
+        if ($meta) {
+            $candidates["MediaCreateDate"]   = $meta.MediaCreateDate
+            $candidates["CreateDate"]        = $meta.CreateDate
+            $candidates["TrackCreateDate"]   = $meta.TrackCreateDate
+            $candidates["Keys:CreationDate"] = $meta.'Keys:CreationDate'
+            $candidates["FileModifyDate"]    = $meta.FileModifyDate
+        }
+
+        $utcDto   = $null
+        $usedTag  = $null
+        foreach ($kv in $candidates.GetEnumerator()) {
+            $utcDto = Convert-ToUtcDto $kv.Value
+            if ($utcDto) { $usedTag = $kv.Key; break }
+        }
+
+        if (-not $utcDto) {
+            $utcDto  = [datetimeoffset]::new($video.CreationTimeUtc)
+            $usedTag = 'CreationTimeUtc'
+        }
+
+        [pscustomobject]@{
+            FileObject   = $video
+            OriginalName = $video.Name
+            SortDateUtc  = $utcDto
+            UtcSeconds   = $utcDto.ToUnixTimeSeconds()
+            SourceTag    = $usedTag
+        }
+    }
+
+    # 5) Sort and compute padded width (robust)
+    $SortedVideos = $VideoRecords | Sort-Object UtcSeconds, @{e={$_.OriginalName}}
+    $StartIndex = 1
+    $DigitWidth = [Math]::Max(
+        2,
+        [int][Math]::Ceiling(
+            [Math]::Log10([double]([Math]::Max(1, $SortedVideos.Count + $StartIndex)))
+        )
+    )
+
+    # Uniqueness helper
+    function Get-UniqueFileName($DirectoryPath, $ProposedName) {
+        $FullCandidatePath = Join-Path $DirectoryPath $ProposedName
+        if (-not (Test-Path -LiteralPath $FullCandidatePath)) { return $ProposedName }
+        $Base = [IO.Path]::GetFileNameWithoutExtension($ProposedName)
+        $Ext  = [IO.Path]::GetExtension($ProposedName)
+        $i = 1
+        while ($true) {
+            $Alt = "{0} ({1}){2}" -f $Base, $i, $Ext
+            if (-not (Test-Path -LiteralPath (Join-Path $DirectoryPath $Alt))) { return $Alt }
+            $i++
+        }
+    }
+
+    # 6) Preview / Rename
+    "{0,-4} {1,-34} {2,-19} {3} {4}" -f "No.", "OldName", "When(UTC)", "NewName", "Source"
+
+    $Counter = $StartIndex
+    foreach ($video in $SortedVideos) {
+        $Prefix = ('{0:D' + $DigitWidth + '}') -f $Counter
+        $NewName = "{0}_{1}" -f $Prefix, $video.OriginalName
+        $UniqueName = Get-UniqueFileName $video.FileObject.DirectoryName $NewName
+
+        "{0,-4} {1,-34} {2,-19} {3} {4}" -f $Counter, $video.OriginalName, $video.SortDateUtc.ToString("yyyy-MM-dd HH:mm:ss"), $UniqueName, $video.SourceTag
+
+        if (-not $DryRun) {
+            Rename-Item -LiteralPath $video.FileObject.FullName -NewName $UniqueName
+        }
+        $Counter++
+    }
+
+    if ($DryRun) {
+        Write-Host "`n(DRY RUN) No files were renamed. Use -DryRun:`$false to apply changes." -ForegroundColor Yellow
+    }
+}
+
+# Exported functions
 Export-ModuleMember -Function Group-iPhoneMedia
 Export-ModuleMember -Function Invoke-SyncFolders
+Export-ModuleMember -Function Add-FileNamePrefix
+Export-ModuleMember -Function Rename-VideosByCaptureDate
+Export-ModuleMember -Function Rename-PhotosByDateTaken

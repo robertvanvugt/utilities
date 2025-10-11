@@ -7,8 +7,8 @@
 #       Rename files to include creator name       #
 ####################################################
 
-$folderpath = "E:\Pictures\2025\Vakantie USA 2025\LivePhotos"
-$Prefix     = "ROB_"
+$folderpath = "E:\Pictures\2025\Vakantie USA 2025\USA 2025\Videos"
+$Prefix     = "LON_"
 
 Get-ChildItem -Path $folderpath -File | ForEach-Object {
     $newName = $Prefix + $_.Name

@@ -39,6 +39,7 @@ function Update-Modules {
             Write-Host "✅ $name module successfully installed!" -ForegroundColor Green
             Write-Host "   Version: $($module.Version)" -ForegroundColor Gray
             Write-Host "   Path: $($module.ModuleBase)" -ForegroundColor Gray
+            Write-Host "   Exported functions: $([string]::Join(', ', $module.ExportedCommands.Keys))" -ForegroundColor Magenta
         } else {
             Write-Error "❌ $name module installation failed!"
         }
